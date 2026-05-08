@@ -75,8 +75,6 @@ Why an SBOM matters:
 - it supports audits, compliance, and security review
 - it gives a clean inventory for later comparison and tracking
 
-### CycloneDX Overview
-
 [CycloneDX](https://cyclonedx.org/) is a widely adopted SBOM format, developed by OWASP. 
 CycloneDX SBOMs can be produced in either JSON or XML. For most JavaScript/TypeScript projects, it lists packages like npm dependencies along with pertinent details.
 
