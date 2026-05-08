@@ -68,19 +68,39 @@ The main benefit is that you catch risk **earlier** and get repeatable security 
 
 An SBOM is a **Software Bill of Materials**: a list of the packages and components that make up your application.
 
-In this repo, the workflow creates:
-
-- an SBOM file: `sbom_lex_api_spdx.json`
-- scan outputs: `inspector_scan_results.json`, `inspector_scan_results.csv`, and `inspector_scan_results.md`
-
-This demo is focused on **source repository scanning**. It is **not** scanning a built container image in ECR. That matters because this kind of scan happens earlier in the delivery flow, before packaging or deployment.
- 
 Why an SBOM matters:
 
 - it shows what is inside the software
 - it helps you respond faster when a new CVE appears
 - it supports audits, compliance, and security review
 - it gives a clean inventory for later comparison and tracking
+
+### CycloneDX Overview
+
+[CycloneDX](https://cyclonedx.org/) is a widely adopted SBOM format, developed by OWASP. 
+CycloneDX SBOMs can be produced in either JSON or XML. For most JavaScript/TypeScript projects, it lists packages like npm dependencies along with pertinent details.
+
+**Example CycloneDX JSON:**
+```json
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "components": [
+    {
+      "name": "react",
+      "version": "18.2.0",
+      "licenses": ["MIT"],
+      "type": "library"
+    }
+  ]
+}
+```
+
+In this repository, the workflow generates:
+- an SBOM file: `sbom_xx_spdx.json`
+- scan outputs: `inspector_scan_results.json`, `inspector_scan_results.csv`, and `inspector_scan_results.md`
+
+This demo is focused on **source repository scanning**. It is **not** scanning a built container image in ECR. That matters because this kind of scan happens earlier in the delivery flow, before packaging or deployment.
 
 `sbom-accepted-cves.json` is the demo allowlist. It shows how a team can document known accepted risk instead of treating every finding as equally urgent.
  
