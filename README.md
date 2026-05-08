@@ -1,184 +1,133 @@
 # SBOM Scan Toolkit
 
-Demo repository showing how to generate a Software Bill of Materials (SBOM), scan a repository with Amazon Inspector, archive the results, and optionally open a Jira ticket when serious vulnerabilities remain.
+Small demo repo that shows how a GitHub Actions workflow can generate an SBOM, ask Amazon Inspector to analyze the repository, save the results, and optionally open a Jira ticket.
 
-This repo is intentionally set up as a **reference example**, not a production-ready deployment. The AWS account ID, IAM role ARN, S3 bucket, Jira site, and SSM parameter names are placeholders.
+This repo is for **explanation and demo**. The AWS account, IAM role, S3 bucket, Jira URL, and SSM paths are fake placeholders.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[GitHub Actions workflow] --> B[OIDC auth to AWS]
+    B --> C[Demo IAM role]
+    C --> D[Amazon Inspector scan]
+    D --> E[SBOM JSON]
+    D --> F[Scan JSON / CSV / Markdown]
+    F --> G[Accepted CVE gate]
+    E --> H[GitHub artifact]
+    F --> H
+    F --> I[Optional S3 upload]
+    G --> J[Optional Jira ticket]
+```
 
 ## What this workflow does
 
-The main workflow lives at `.github/workflows/sbom-scan.yml`.
+The workflow is in `.github/workflows/sbom-scan.yml`.
 
-On a schedule or manual run, it:
+On a scheduled or manual run it:
 
-1. Checks out the repository.
-2. Configures AWS credentials through GitHub Actions OIDC.
-3. Runs the Amazon Inspector GitHub Action to:
-   - generate an SBOM
-   - scan the repository for vulnerabilities
-   - write JSON, CSV, and Markdown outputs
-4. Runs a gating step that:
-   - reads the Inspector CSV when available
-   - excludes CVEs listed in `sbom-accepted-cves.json`
-   - decides whether a Jira ticket should be created
-5. Uploads generated files as GitHub Actions artifacts.
-6. Optionally uploads those files to S3.
-7. Optionally creates a Jira ticket with a Markdown summary attached.
+1. checks out the repo
+2. authenticates from GitHub Actions to AWS with OIDC
+3. runs the Amazon Inspector GitHub Action
+4. generates an SBOM plus scan outputs in JSON, CSV, and Markdown
+5. removes accepted CVEs listed in `sbom-accepted-cves.json` from the CSV-based gate
+6. uploads the outputs as a GitHub artifact
+7. optionally uploads the files to S3
+8. optionally creates a Jira ticket if High or Critical findings remain
 
-The workflow is **informational by default**. It uses `continue-on-error: true` and very high severity thresholds, so the job demonstrates the flow without blocking merges.
+This workflow is **informational** by design. It does not fail the pipeline on severity counts, which makes it easier to demo and explain.
 
-## What is AWS Inspector?
+For a real run, you would need:
 
-Amazon Inspector is an AWS security service that can analyze software and infrastructure for known vulnerabilities and unintended exposure. In this repo, it is used in its repository scanning mode through the GitHub Action `aws-actions/vulnerability-scan-github-action-for-amazon-inspector`.
+- a GitHub repo with Actions enabled
+- an AWS account with GitHub OIDC trust configured
+- a real IAM role that GitHub can assume
+- permissions for Inspector, and optionally S3 and SSM
+- Jira credentials and Jira configuration if you keep the Jira step
 
-For this demo, Inspector is used to:
+## Demo flow
 
-- build an SBOM for the checked-out repository
-- identify vulnerable packages and components
-- produce machine-readable and human-readable outputs
-- expose counts such as High and Critical findings that downstream steps can act on
+This repo is easiest to understand as a traffic flow:
 
-In simple terms: the workflow asks Inspector to tell you **what software is in the repo** and **whether any known vulnerable components were found**.
-
-## What is an SBOM?
-
-An SBOM, or Software Bill of Materials, is an inventory of the software components that make up an application or codebase. It is similar to an ingredients list for software.
-
-Teams use SBOMs to:
-
-- understand what packages and dependencies they ship
-- investigate exposure when a new CVE is announced
-- support audits, compliance, and vendor review processes
-- keep security evidence for later review
-
-## Repository layout
-
-```text
-.
-├── .github/workflows/sbom-scan.yml
-├── scripts/sbom-check-with-exclusions.sh
-├── scripts/sbom-jira-sync.sh
-└── sbom-accepted-cves.json
+```mermaid
+flowchart TD
+    A[Start: schedule or Run workflow] --> B[Checkout repo]
+    B --> C[Configure AWS credentials]
+    C --> D[Amazon Inspector action]
+    D --> E[Create SBOM]
+    D --> F[Create scan reports]
+    F --> G[Check CSV against accepted CVEs]
+    G --> H{Remaining High/Critical?}
+    E --> I[Upload artifact]
+    F --> I
+    H -->|No| K[End with summary]
+    H -->|Yes| J[Optional Jira ticket]
+    I --> L[Optional S3 upload]
+    J --> K
+    L --> K
 ```
 
-- `.github/workflows/sbom-scan.yml`: the GitHub Actions workflow
-- `scripts/sbom-check-with-exclusions.sh`: removes accepted CVEs from the CSV-based gate
-- `scripts/sbom-jira-sync.sh`: creates a Jira ticket and attaches the Markdown summary
-- `sbom-accepted-cves.json`: accepted-risk list used by the gate
+If you want to walk through the demo in order:
 
-## How the workflow decides whether to create Jira
+1. read this `README.md`
+2. open `.github/workflows/sbom-scan.yml`
+3. open `scripts/sbom-check-with-exclusions.sh`
+4. open `scripts/sbom-jira-sync.sh`
+5. review `sbom-accepted-cves.json`
 
-The workflow does **not** create a Jira ticket for every run.
+If you want to run the demo in GitHub, push the repo, open the **Actions** tab, choose **Generate SBOM and Scan with Amazon Inspector**, and use **Run workflow**.
 
-It first checks whether Inspector produced a CSV file:
+## Concepts
 
-- If the CSV exists, `scripts/sbom-check-with-exclusions.sh` counts High and Critical rows, subtracts anything listed in `sbom-accepted-cves.json`, and writes outputs such as `should_create=true` or `false`.
-- If the CSV does not exist, the workflow falls back to aggregate counts in the JSON output. In that fallback mode, accepted CVEs are **not** subtracted because the JSON path does not provide the same row-level filtering behavior.
+### Amazon Inspector
 
-This means the CSV path is the more precise path for demoing accepted-risk handling.
+Amazon Inspector is an AWS security service that scans code and workloads for known vulnerabilities and exposure issues. In this repo it is used as a **repository-level scan**, not a container image scan.
 
-## How to use this repo
+For this demo, Inspector helps answer two questions:
 
-### Option 1: Read it as a demo
+- what software and dependencies are in this repo
+- are any of those components known to be vulnerable
 
-If your goal is explanation only, start with:
+Why use it:
 
-1. `README.md`
-2. `.github/workflows/sbom-scan.yml`
-3. `scripts/sbom-check-with-exclusions.sh`
-4. `scripts/sbom-jira-sync.sh`
+- it gives security visibility early, before deployment
+- it creates machine-readable outputs you can automate around
+- it helps teams review findings consistently
+- it supports evidence collection through artifacts and optional S3 storage
 
-That gives you the main workflow, the gate logic, and the Jira integration flow in order.
+Cost and benefit:
 
-### Option 2: Run it in your own AWS account
+- Amazon Inspector is pay-as-you-go and AWS offers a free trial for new Inspector accounts
+- AWS states code repository scans are billed based on the number of scans performed across scan types, and large repos can count as multiple repos for billing
+- for a small demo or occasional manual run, cost is usually modest
+- for many repos, frequent schedules, or change-based scans, cost grows with scan volume
 
-Before running this for real, replace the demo placeholders in `.github/workflows/sbom-scan.yml`:
+The main benefit is that you catch risk **earlier** and get repeatable security evidence. The tradeoff is ongoing scan cost and some setup complexity.
 
-- `aws-region`
-- `role-to-assume`
-- S3 bucket and prefix
-- SSM parameter names for Jira
-- any naming you want for artifacts and outputs
+### SBOM
 
-You should also review:
+An SBOM is a **Software Bill of Materials**: a list of the packages and components that make up your application.
 
-- `scripts/sbom-jira-sync.sh` for your Jira base URL, project key, issue type, and parent relationship
-- `sbom-accepted-cves.json` for your own accepted-risk entries
+In this repo, the workflow creates:
 
-## Required setup for a real run
+- an SBOM file: `sbom_lex_api_spdx.json`
+- scan outputs: `inspector_scan_results.json`, `inspector_scan_results.csv`, and `inspector_scan_results.md`
 
-To make this workflow actually work in a real repository, you need:
+This demo is focused on **source repository scanning**. It is **not** scanning a built container image in ECR. That matters because this kind of scan happens earlier in the delivery flow, before packaging or deployment.
 
-1. A GitHub repository with Actions enabled.
-2. An AWS account configured for GitHub OIDC federation.
-3. An IAM role that GitHub Actions is allowed to assume.
-4. Permissions on that role for the Amazon Inspector workflow and any optional S3 or SSM operations.
-5. If you keep the Jira steps, a Jira site plus credentials available through SSM or another secret mechanism.
+Why scan at the repo stage:
 
-## Manual usage
+- you can catch vulnerable dependencies earlier
+- fixes are usually cheaper before build and release
+- you can review accepted risk in code review and workflow outputs
+- you get visibility even if no container image has been built yet
 
-The workflow supports:
+Why an SBOM matters:
 
-- a scheduled run on the first day of each month
-- a manual run through `workflow_dispatch`
+- it shows what is inside the software
+- it helps you respond faster when a new CVE appears
+- it supports audits, compliance, and security review
+- it gives a clean inventory for later comparison and tracking
 
-To trigger it manually:
-
-1. Push this repo to GitHub.
-2. Open the repository's **Actions** tab.
-3. Open **Generate SBOM and Scan with Amazon Inspector**.
-4. Click **Run workflow**.
-
-## Outputs you get
-
-The workflow writes four main outputs:
-
-- `sbom_lex_api_spdx.json`: the generated SBOM
-- `inspector_scan_results.json`: Inspector scan output
-- `inspector_scan_results.csv`: tabular findings used by the exclusion gate
-- `inspector_scan_results.md`: Markdown summary useful for Jira attachment or quick review
-
-It also uploads these as a GitHub artifact named like `demo-sbom-and-scan-<run_id>`.
-
-## Accepted CVEs
-
-`sbom-accepted-cves.json` lets you document risks that are known and intentionally accepted for now.
-
-Each entry includes:
-
-- CVE ID
-- package name
-- reason
-- added date
-
-This is useful when:
-
-- a vulnerable dependency is not actually exercised in your runtime path
-- no upstream fix exists yet
-- the issue is mitigated another way
-- the team has consciously accepted the risk temporarily
-
-Even in a demo repo, this file is important because it explains how the workflow separates **known accepted risk** from **new actionable findings**.
-
-## Important demo note
-
-This repo contains placeholder values on purpose. It is meant to explain the workflow shape and logic, not to be run unchanged.
-
-Examples of placeholder values include:
-
-- AWS account ID `111122223333`
-- demo IAM role name
-- demo S3 bucket
-- demo Jira URL
-- demo SSM parameter paths
-- demo fallback email
-
-## Suggested customization
-
-If you want to turn this into a reusable template, good next improvements are:
-
-- rename output files to be more generic than `sbom_lex_api_spdx.json`
-- make AWS region, role ARN, bucket, and Jira values repository variables or secrets
-- add a top-level architecture diagram
-- add a sample GitHub Actions run screenshot
-- add an example of a generated CSV and Markdown report
+`sbom-accepted-cves.json` is the demo allowlist. It shows how a team can document known accepted risk instead of treating every finding as equally urgent.
  
