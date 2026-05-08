@@ -1,0 +1,276 @@
+# -----------------------------------------------------------------------------
+# DEMO / REFERENCE ONLY — not wired to a real AWS account or production OIDC trust.
+# Replace role ARN, region, S3 bucket, and SSM paths before running against real AWS.
+# AWS account ID below is a placeholder (111122223333); role name is illustrative only.
+# -----------------------------------------------------------------------------
+#
+# Monthly SBOM generation + Amazon Inspector scan. Informational only (does not fail the workflow).
+# Jira when remaining HIGH/CRITICAL after sbom-accepted-cves (per CSV row). JSON aggregate fallback if no CSV.
+# Layout: `scripts/` and `sbom-accepted-cves.json` at repo root (visible in the GitHub file tree). Only this
+# workflow file must live under `.github/workflows/` — that is where GitHub loads Actions YAML from.
+
+name: Generate SBOM and Scan with Amazon Inspector
+
+on:
+  schedule:
+    # First day of each month, 09:00 UTC
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sbom-scan-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sbom-scan:
+    runs-on: ubuntu-latest
+    # Never mark the workflow as failed because of scan thresholds, Jira, or uploads.
+    continue-on-error: true
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      SBOM_PATH: ./sbom_lex_api_spdx.json
+      SCAN_JSON_PATH: ./inspector_scan_results.json
+      SCAN_CSV_PATH: ./inspector_scan_results.csv
+      SCAN_MD_PATH: ./inspector_scan_results.md
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Demo placeholder region + role — substitute your real region and OIDC-assumable role ARN.
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::111122223333:role/DemoGitHubActionsSbomInspectorRole
+
+      - name: Generate SBOM (with license collection) and Scan
+        id: inspector
+        continue-on-error: true
+        uses: aws-actions/vulnerability-scan-github-action-for-amazon-inspector@v1
+        with:
+          artifact_type: "repository"
+          artifact_path: "./"
+          display_vulnerability_findings: "enabled"
+
+          # High limits: report findings but do not treat thresholds as a hard failure (job is informational).
+          critical_threshold: 99999
+          high_threshold: 99999
+          medium_threshold: 99999
+          low_threshold: 99999
+          other_threshold: 99999
+
+          output_sbom_path: ${{ env.SBOM_PATH }}
+          output_inspector_scan_path: ${{ env.SCAN_JSON_PATH }}
+          output_inspector_scan_path_csv: ${{ env.SCAN_CSV_PATH }}
+          output_inspector_scan_path_markdown: ${{ env.SCAN_MD_PATH }}
+
+      - name: Jira gate — accepted CVEs excluded (CSV)
+        id: severity_check
+        if: always()
+        continue-on-error: true
+        env:
+          SBOM_INFORMATIONAL: "1"
+        run: |
+          set +e
+          SCAN="${{ env.SCAN_JSON_PATH }}"
+          SCAN_CSV="${{ env.SCAN_CSV_PATH }}"
+          ACCEPTED="./sbom-accepted-cves.json"
+          {
+            echo "### Jira / severity gate"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ! -f "$SCAN" ]; then
+            echo "No Inspector scan JSON at $SCAN"
+            echo "should_create=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "No Inspector scan JSON — no Jira ticket."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          jq_counts() {
+            local path="$1"
+            CRITICAL=$(jq -r '
+              def norm_props($p):
+                if $p == null then []
+                elif ($p | type) == "array" then $p
+                else []
+                end;
+              def props:
+                norm_props((.sbom // {}).metadata.properties)
+                + norm_props(.metadata.properties);
+              props
+              | map(select(.name == "amazon:inspector:sbom_scanner:critical_vulnerabilities"))
+              | if length > 0 then (.[0].value | tostring) else "0" end
+              | tonumber
+            ' "$path" 2>/dev/null || echo 0)
+            HIGH=$(jq -r '
+              def norm_props($p):
+                if $p == null then []
+                elif ($p | type) == "array" then $p
+                else []
+                end;
+              def props:
+                norm_props((.sbom // {}).metadata.properties)
+                + norm_props(.metadata.properties);
+              props
+              | map(select(.name == "amazon:inspector:sbom_scanner:high_vulnerabilities"))
+              | if length > 0 then (.[0].value | tostring) else "0" end
+              | tonumber
+            ' "$path" 2>/dev/null || echo 0)
+            case "$CRITICAL" in ''|*[!0-9]*) CRITICAL=0 ;; esac
+            case "$HIGH" in ''|*[!0-9]*) HIGH=0 ;; esac
+          }
+
+          if [ -f "$SCAN_CSV" ]; then
+            chmod +x scripts/sbom-check-with-exclusions.sh
+            scripts/sbom-check-with-exclusions.sh "$SCAN_CSV" "$ACCEPTED"
+            echo "Gate: CSV with exclusions (see log for excluded IDs)."
+            {
+              echo "- **Gate:** per-row CSV; CVEs in \`sbom-accepted-cves.json\` (repo root) are excluded from the Jira/severity count."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::No scan CSV — cannot apply accepted CVE list. Using aggregate JSON counts for Jira (may over-alert vs accepted list)."
+            jq_counts "$SCAN"
+            echo "Aggregates (JSON, no per-CVE exclusion): critical=$CRITICAL high=$HIGH"
+            if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+              echo "should_create=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_create=false" >> "$GITHUB_OUTPUT"
+            fi
+            echo "remaining_after_exclusions=n/a" >> "$GITHUB_OUTPUT"
+            echo "excluded_from_gate=0" >> "$GITHUB_OUTPUT"
+            echo "gate_source=json_fallback" >> "$GITHUB_OUTPUT"
+            {
+              echo "- **Gate:** JSON aggregate (accepted CVEs **not** subtracted in this run)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -f "$GITHUB_OUTPUT" ]; then
+            {
+              echo ""
+              echo "**Gate outputs**"
+              while IFS= read -r _line; do
+                [ -n "$_line" ] && echo "  - \`$_line\`"
+              done < "$GITHUB_OUTPUT"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+
+      - name: Upload SBOM and Scan Results as Artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-sbom-and-scan-${{ github.run_id }}
+          path: |
+            ${{ env.SBOM_PATH }}
+            ${{ env.SCAN_JSON_PATH }}
+            ${{ env.SCAN_CSV_PATH }}
+            ${{ env.SCAN_MD_PATH }}
+          if-no-files-found: ignore
+
+      - name: Upload files to S3 Evidence Bucket
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          DATE_MONTH=$(date -u +%Y-%m)
+          DATE_FULL=$(date -u +%Y-%m-%d)
+          BASE="s3://demo-placeholder-evidence-bucket/inspector/sbom/demo/${DATE_MONTH}/${DATE_FULL}/monthly-${{ github.run_id }}"
+          echo "s3_base=$BASE" >> "$GITHUB_ENV"
+
+          for f in "$SBOM_PATH" "$SCAN_JSON_PATH" "$SCAN_CSV_PATH" "$SCAN_MD_PATH"; do
+            if [ -f "$f" ]; then
+              name=$(basename "$f")
+              echo "Uploading $f -> $BASE/$name"
+              aws s3 cp "$f" "$BASE/$name"
+            else
+              echo "Skip missing: $f"
+            fi
+          done
+
+      - name: Fetch Jira credentials from SSM
+        if: always() && steps.severity_check.outputs.should_create == 'true'
+        id: ssm
+        continue-on-error: true
+        run: |
+          PARAMS=(
+            "/demo/example/jira/token:JIRA_TOKEN"
+            "/demo/example/jira/email:JIRA_EMAIL"
+            "/demo/example/jira/epic_key:EPIC_KEY"
+            "/demo/example/jira/assignee_account_id:ASSIGNEE"
+          )
+
+          for p in "${PARAMS[@]}"; do
+            NAME="${p%%:*}"
+            VAR="${p##*:}"
+            VALUE=$(aws ssm get-parameter \
+              --name "$NAME" \
+              --with-decryption \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null)
+            # Heredoc form: values with '=' (e.g. Jira/API tokens) break simple NAME=value lines in GITHUB_ENV.
+            delim="SSM_${GITHUB_RUN_ID}_${VAR}"
+            {
+              echo "${VAR}<<${delim}"
+              printf '%s\n' "$VALUE"
+              echo "${delim}"
+            } >> "$GITHUB_ENV"
+            printf -v "$VAR" '%s' "$VALUE"
+            export "$VAR"
+          done
+
+          if [ -z "$JIRA_EMAIL" ]; then
+            JIRA_EMAIL="demo-placeholder@example.com"
+            delim="SSM_${GITHUB_RUN_ID}_JIRA_EMAIL_FALLBACK"
+            {
+              echo "JIRA_EMAIL<<${delim}"
+              printf '%s\n' "$JIRA_EMAIL"
+              echo "${delim}"
+            } >> "$GITHUB_ENV"
+          fi
+
+          if [ -z "$JIRA_TOKEN" ] || [ -z "$EPIC_KEY" ]; then
+            echo "::warning::Missing Jira SSM parameters; skipping Jira sync."
+            echo "skip_jira=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "epic_key=${EPIC_KEY}" >> "$GITHUB_OUTPUT"
+          echo "assignee=${ASSIGNEE}" >> "$GITHUB_OUTPUT"
+          echo "skip_jira=false" >> "$GITHUB_OUTPUT"
+
+      - name: Create Jira ticket for this run
+        if: always() && steps.severity_check.outputs.should_create == 'true' && steps.ssm.outputs.skip_jira == 'false'
+        continue-on-error: true
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          REPO="${{ github.event.repository.name }}"
+          EPIC="${{ steps.ssm.outputs.epic_key }}"
+          S3_BASE="${{ env.s3_base }}"
+          MD="${{ env.SCAN_MD_PATH }}"
+          [ -f "$MD" ] || MD=""
+          chmod +x scripts/sbom-jira-sync.sh
+          scripts/sbom-jira-sync.sh \
+            "$REPO" \
+            "$EPIC" \
+            "${{ github.run_id }}" \
+            "$JIRA_EMAIL" \
+            "$JIRA_TOKEN" \
+            "${{ steps.ssm.outputs.assignee }}" \
+            "$RUN_URL" \
+            "${S3_BASE:-none}" \
+            "$MD"
+
+      - name: Workflow completed (informational)
+        if: always()
+        run: |
+          echo "### SBOM / Inspector monthly scan (informational)" >> "$GITHUB_STEP_SUMMARY"
+          echo "This workflow does not block merges. Jira uses \`sbom-accepted-cves.json\` at repo root when a scan **CSV** is present; otherwise a JSON **aggregate** gate is used (exclusions not applied). Review artifacts and S3." >> "$GITHUB_STEP_SUMMARY"

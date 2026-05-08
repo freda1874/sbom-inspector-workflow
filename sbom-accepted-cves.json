@@ -1,0 +1,17 @@
+{
+  "description": "CVEs accepted as documented risk. IDs must match the Inspector scan CSV.",
+  "accepted_cves": [
+    {
+      "id": "CVE-2024-23342",
+      "package": "ecdsa",
+      "reason": "Used: Transitive dep (cognitojwt → python-jose) for Cognito JWT auth. OK to ignore: We use python-jose[cryptography] — actual crypto runs in cryptography lib, not ecdsa. ecdsa is installed but unused. No fix exists (upstream won't patch).",
+      "added": "2025-03-02"
+    },
+    {
+      "id": "CVE-2025-11849",
+      "package": "mammoth",
+      "reason": "Used: DOCX-to-HTML conversion (Word docs). OK to ignore: Custom fork (learnexperts/python-mammoth); fix requires merging upstream 1.11.0 into fork. Tracked for future fix.",
+      "added": "2025-03-02"
+    }
+  ]
+}
